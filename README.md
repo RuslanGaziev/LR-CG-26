@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🌋 Vulkan Starter App
 
 ## Getting started
@@ -64,3 +65,7 @@ because relative paths are used.
 `CMakeLists.txt` has a build recipe for compiling shader files
 along with an application. Look for a comment in this file to see
 how to compile your shaders.
+=======
+# LR-CG-26
+Здесь будут храниться лабораторные работы по компьютерной графике.
+>>>>>>> 2055152d10fb76a9ed6d93d1d2ec7445e85a126d

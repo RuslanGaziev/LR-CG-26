@@ -1,4 +1,10 @@
-<<<<<<< HEAD
+# LR-CG-26
+# Газиев Руслан Ибрагимович
+# Группа: М8О-304БВ-24
+# Здесь будут храниться лабораторные работы по компьютерной графике.
+С тегом `LR1` размещена <ins>**лабораторная работа номер 1**<ins>
+
+
 # 🌋 Vulkan Starter App
 
 ## Getting started
@@ -66,6 +72,3 @@ because relative paths are used.
 along with an application. Look for a comment in this file to see
 how to compile your shaders.
 =======
-# LR-CG-26
-Здесь будут храниться лабораторные работы по компьютерной графике.
->>>>>>> 2055152d10fb76a9ed6d93d1d2ec7445e85a126d

@@ -14,30 +14,114 @@ namespace application {
 
     namespace {
 
+        // ============================================================
+        // ВЕРШИНА
+        // ============================================================
+        // Из лекции №4: для освещения по Блинн-Фонгу нам нужна
+        // НОРМАЛЬ поверхности в каждой вершине. Без неё невозможно
+        // вычислить cos(θ) — угол между нормалью и направлением света.
+        // Поэтому в структуру добавляется третье поле: normal.
         struct Vertex {
             glm::vec3 pos;
             glm::vec3 color;
+            glm::vec3 normal;   // ← НОВОЕ: нормаль поверхности
         };
 
+        // ============================================================
+        // UNIFORM-БУФЕР
+        // ============================================================
+        // Из лекции №4 (слайд 29, формула Блинн-Фонга):
+        //   C = I·(cosθ·K_d + K_s·(cosφ)^α) + I_a·K_a
+        //
+        // Чтобы шейдер мог посчитать эту формулу, ему нужно:
+        //   • MVP для позиции вершины
+        //   • model — чтобы перевести нормаль в мировые координаты
+        //   • camera_pos — вектор v (от фрагмента к камере)
+        //   • light_direction — вектор ω (от фрагмента к свету)
+        //   • light_color — интенсивность I источника
+        //   • ambient_light — I_a (рассеянный свет)
+        //   • albedo — K_d (базовый цвет материала)
+        //   • specular — K_s (цвет блика)
+        //   • shininess — α (коэффициент блеска)
+        //
+        // ВАЖНО: в uniform-буфере с layout std140 поля vec3 выравниваются
+        // по границе 16 байт (как vec4). Поэтому используем vec4 для
+        // всего, что связано с цветом/направлением — так проще и не будет
+        // «съезда» данных.
         struct UBO {
-            glm::mat4 mvp;
-            glm::vec4 color;
+            glm::mat4 mvp;             // 64 байта
+            glm::mat4 model;           // 64 байта
+
+            glm::vec4 camera_pos;      // xyz = позиция, w = не используется
+            glm::vec4 light_direction; // xyz = направление (мировое), w = 0
+            glm::vec4 light_color;     // xyz = цвет × интенсивность, w = 1
+            glm::vec4 ambient_light;   // xyz = цвет ambient, w = 1
+
+            glm::vec4 albedo;          // K_d (цвет материала)
+            glm::vec4 specular;        // K_s (цвет блика)
+            glm::vec4 material;        // x = shininess (α), остальное — паддинг
         };
 
-        // --- Состояние UI ---
+        // ============================================================
+        // СОСТОЯНИЕ UI — ГЕОМЕТРИЯ МОДЕЛИ (из лабы №1)
+        // ============================================================
         glm::vec3 g_position(0.0f);
         glm::vec3 g_rotation(30.0f, 45.0f, 0.0f);
         glm::vec3 g_scale(1.0f);
-        glm::vec3 g_color(1.0f, 0.6f, 0.2f);
         int       g_projectionMode = 1;
 
-        // --- Анимация ---
         bool  g_animPlaying = true;
-        float g_animSpeed = 0.002f;
+        float g_animSpeed = 0.1f;    // медленно, чтобы не «трясло»
         float g_animRadius = 2.0f;
         float g_animTime = 0.0f;
 
-        // ---------- helpers ----------
+        // ============================================================
+        // СОСТОЯНИЕ UI — КАМЕРА (НОВОЕ в лабе №2)
+        // ============================================================
+        // Из лекции №4 (слайды 5–9): камера — это точка + ориентация.
+        // Матрица вида V — это ОБРАТНАЯ матрица камеры.
+        // Мы параметризуем камеру через:
+        //   • position — где стоит глаз
+        //   • yaw/pitch — куда смотрит (углы Эйлера)
+        //   • fov — угол обзора (для перспективной проекции)
+        glm::vec3 g_cameraPos(0.0f, 2.0f, 6.0f);
+        float     g_cameraYaw   = -90.0f;  // -90° = смотрим вдоль -Z (в центр)
+        float     g_cameraPitch = -15.0f;  // слегка вниз
+        float     g_cameraFov   = 45.0f;
+
+        // ============================================================
+        // СОСТОЯНИЕ UI — ИСТОЧНИК СВЕТА (НОВОЕ)
+        // ============================================================
+        // Из лекции №4 (слайд 14): направленный источник (directional)
+        // моделируется как бесконечно удалённый — все лучи параллельны.
+        // Поэтому у него нет позиции, только НАПРАВЛЕНИЕ и цвет+интенсивность.
+        glm::vec3 g_lightDirection(-0.5f, -1.0f, -0.3f);
+        glm::vec3 g_lightColor(1.0f, 1.0f, 1.0f);
+        float     g_lightIntensity = 1.5f;
+
+        // ============================================================
+        // СОСТОЯНИЕ UI — AMBIENT (рассеянный свет)
+        // ============================================================
+        // Из лекции №4 (слайд 25): ambient аппроксимирует свет,
+        // который приходит отовсюду из окружения. У него нет направления,
+        // он равномерно освещает все поверхности. Грубо, но без него
+        // теневые стороны становятся полностью чёрными.
+        glm::vec3 g_ambientColor(0.15f, 0.15f, 0.18f);
+
+        // ============================================================
+        // СОСТОЯНИЕ UI — МАТЕРИАЛ (НОВОЕ)
+        // ============================================================
+        // Из лекции №4 (слайды 21–24):
+        //   K_d — альбедо (базовый цвет материала)
+        //   K_s — цвет блика (обычно белый или близкий к нему)
+        //   α   — блеск: чем больше, тем меньше и ярче блик
+        glm::vec3 g_albedo(0.9f, 0.4f, 0.3f);      // K_d
+        glm::vec3 g_specularColor(1.0f, 1.0f, 1.0f); // K_s
+        float     g_shininess = 32.0f;              // α
+
+        // ============================================================
+        // ПРОЧЕЕ (шейдерные модули и т.п.)
+        // ============================================================
         std::vector<char> readFile(const std::string& path) {
             std::ifstream f(path, std::ios::ate | std::ios::binary);
             if (!f.is_open()) {
@@ -60,18 +144,66 @@ namespace application {
             return mod;
         }
 
-        // ---------- Пирамида ----------
+        // ============================================================
+        // ГЕОМЕТРИЯ ПИРАМИДЫ + ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ НОРМАЛЕЙ
+        // ============================================================
+        // Из ТЗ лабы №2: «Нормали вершин рисуемого объекта нужно
+        // генерировать процедурно».
+        //
+        // Идея: для каждого треугольника (A, B, C) нормаль вычисляется
+        // через векторное произведение двух его рёбер:
+        //     N = normalize(cross(B - A, C - A))
+        //
+        // Это классическая формула плоской нормали. Все три вершины
+        // одного треугольника получают одну и ту же нормаль —
+        // такой подход называется FLAT SHADING (плоское затенение).
+        // Он идеально подходит для пирамиды: грани плоские, поэтому
+        // освещение каждой грани будет выглядеть как у настоящей
+        // кристаллической пирамиды.
         void buildPyramid() {
             auto& ctx = graphics::internal::context;
 
-            std::vector<Vertex> verts = {
-                {{-1,-1, 1}, {0.2f,0.8f,0.2f}}, {{-1,-1,-1}, {0.8f,0.2f,0.8f}}, {{ 1,-1,-1}, {0.8f,0.8f,0.2f}},
-                {{-1,-1, 1}, {0.2f,0.8f,0.2f}}, {{ 1,-1,-1}, {0.8f,0.8f,0.2f}}, {{ 1,-1, 1}, {0.2f,0.2f,0.8f}},
-                {{ 0, 1, 0}, {1,0,0}}, {{-1,-1, 1}, {0.2f,0.8f,0.2f}}, {{ 1,-1, 1}, {0.2f,0.2f,0.8f}},
-                {{ 0, 1, 0}, {1,0,0}}, {{ 1,-1, 1}, {0.2f,0.2f,0.8f}}, {{ 1,-1,-1}, {0.8f,0.8f,0.2f}},
-                {{ 0, 1, 0}, {1,0,0}}, {{ 1,-1,-1}, {0.8f,0.8f,0.2f}}, {{-1,-1,-1}, {0.8f,0.2f,0.8f}},
-                {{ 0, 1, 0}, {1,0,0}}, {{-1,-1,-1}, {0.8f,0.2f,0.8f}}, {{-1,-1, 1}, {0.2f,0.8f,0.2f}},
+            // Определяем 8 угловых точек пирамиды в локальных координатах.
+            // Основание — квадрат в плоскости Y = -1. Вершина — (0, 1, 0).
+            glm::vec3 p000(-1.0f, -1.0f,  1.0f);   // передний левый
+            glm::vec3 p001(-1.0f, -1.0f, -1.0f);   // задний левый
+            glm::vec3 p100( 1.0f, -1.0f, -1.0f);   // задний правый
+            glm::vec3 p101( 1.0f, -1.0f,  1.0f);   // передний правый
+            glm::vec3 apex( 0.0f,  1.0f,  0.0f);   // вершина
+
+            // Базовые цвета граней (для отладки; в Блинн-Фонге основной
+            // вклад даёт albedo, но оставим цвета для наглядности)
+            glm::vec3 cBase1(0.8f, 0.8f, 0.2f);
+            glm::vec3 cBase2(0.2f, 0.2f, 0.8f);
+            glm::vec3 cSide1(0.2f, 0.8f, 0.2f);
+            glm::vec3 cSide2(0.8f, 0.2f, 0.8f);
+            glm::vec3 cSide3(0.8f, 0.8f, 0.2f);
+            glm::vec3 cSide4(0.2f, 0.8f, 0.8f);
+
+            std::vector<Vertex> verts;
+            verts.reserve(18);   // 6 треугольников × 3 вершины
+
+            // Лямбда: добавляет треугольник, вычисляя нормаль процедурно.
+            auto addTriangle = [&](const glm::vec3& a, const glm::vec3& b,
+                                   const glm::vec3& c,
+                                   const glm::vec3& ca, const glm::vec3& cb,
+                                   const glm::vec3& cc) {
+                // Процедурная нормаль по формуле cross(B - A, C - A)
+                glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+                verts.push_back({ a, ca, n });
+                verts.push_back({ b, cb, n });
+                verts.push_back({ c, cc, n });
             };
+
+            // Основание — 2 треугольника (нормаль смотрит вниз, т.к. cross даёт -Y)
+            addTriangle(p000, p001, p100, cBase1, cBase1, cBase1);
+            addTriangle(p000, p100, p101, cBase2, cBase2, cBase2);
+
+            // Боковые грани — 4 треугольника, каждая смотрит наружу
+            addTriangle(p000, p101, apex, cSide1, cSide1, cSide1); // передняя
+            addTriangle(p101, p100, apex, cSide2, cSide2, cSide2); // правая
+            addTriangle(p100, p001, apex, cSide3, cSide3, cSide3); // задняя
+            addTriangle(p001, p000, apex, cSide4, cSide4, cSide4); // левая
 
             ctx.vertex_count = (uint32_t)verts.size();
 
@@ -90,7 +222,9 @@ namespace application {
             memcpy(mapInfo.pMappedData, verts.data(), bufInfo.size);
         }
 
-        // ---------- Пайплайн ----------
+        // ============================================================
+        // ГРАФИЧЕСКИЙ КОНВЕЙЕР
+        // ============================================================
         bool createPipeline() {
             auto& ctx = graphics::internal::context;
 
@@ -114,19 +248,23 @@ namespace application {
             stages[1].module = ctx.frag_shader_module;
             stages[1].pName = "main";
 
+            // ── ВЕРШИННЫЙ ВВОД ──────────────────────────────────────
+            // Теперь у нас 3 атрибута: pos (location 0), color (location 1),
+            // normal (location 2). Это ключевое изменение по сравнению с лабой №1.
             VkVertexInputBindingDescription binding{};
             binding.binding = 0;
             binding.stride = sizeof(Vertex);
             binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-            VkVertexInputAttributeDescription attrs[2]{};
+            VkVertexInputAttributeDescription attrs[3]{};
             attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, pos) };
             attrs[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, color) };
+            attrs[2] = { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal) };
 
             VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
             vi.vertexBindingDescriptionCount = 1;
             vi.pVertexBindingDescriptions = &binding;
-            vi.vertexAttributeDescriptionCount = 2;
+            vi.vertexAttributeDescriptionCount = 3;
             vi.pVertexAttributeDescriptions = attrs;
 
             VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
@@ -138,7 +276,7 @@ namespace application {
 
             VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
             rs.polygonMode = VK_POLYGON_MODE_FILL;
-            rs.cullMode = VK_CULL_MODE_NONE;
+            rs.cullMode = VK_CULL_MODE_NONE;   // оставляем отключённым — видно все грани
             rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             rs.lineWidth = 1.0f;
 
@@ -200,6 +338,7 @@ namespace application {
                 return false;
             }
 
+            // ── UNIFORM-БУФЕР (увеличенный) ─────────────────────────
             VkBufferCreateInfo ubInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
             ubInfo.size = sizeof(UBO);
             ubInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -239,6 +378,28 @@ namespace application {
             return true;
         }
 
+        // ============================================================
+        // ХЕЛПЕР: векторы камеры из углов Эйлера
+        // ============================================================
+        // Из лекции №4 (слайды 5–9): камера описывается позицией и
+        // ориентацией. Удобный способ — задать yaw (рыскание вокруг Y)
+        // и pitch (наклон вокруг X). Тогда forward вычисляется так:
+        //
+        //   forward.x = cos(pitch) * cos(yaw)
+        //   forward.y = sin(pitch)
+        //   forward.z = cos(pitch) * sin(yaw)
+        //
+        // Это стандартная сферическая параметризация направления.
+        glm::vec3 computeCameraForward() {
+            float yaw   = glm::radians(g_cameraYaw);
+            float pitch = glm::radians(g_cameraPitch);
+            glm::vec3 f;
+            f.x = std::cos(pitch) * std::cos(yaw);
+            f.y = std::sin(pitch);
+            f.z = std::cos(pitch) * std::sin(yaw);
+            return glm::normalize(f);
+        }
+
     } // anon namespace
 
     // ============================================================
@@ -264,11 +425,18 @@ namespace application {
         if (ctx.frag_shader_module)    vkDestroyShaderModule(ctx.device, ctx.frag_shader_module, nullptr);
     }
 
+    // ============================================================
+    // ОБНОВЛЕНИЕ UI
+    // ============================================================
+    // Добавлены секции: Камера, Источник света, Рассеянный свет, Материал.
+    // Все параметры из формулы Блинн-Фонга (слайд 29 лекции №4)
+    // выведены в интерфейс, как требует базовое задание.
     void update(double time) {
         if (g_animPlaying) g_animTime += (float)time * g_animSpeed;
 
-        ImGui::Begin("Лаба №1 — Пирамида");
+        ImGui::Begin("Лаба №2 — Камера и освещение");
 
+        // ── ПРОЕКЦИЯ ────────────────────────────────────────────
         ImGui::Text("Проекция:");
         ImGui::RadioButton("Перспективная", &g_projectionMode, 1);
         ImGui::SameLine();
@@ -276,38 +444,95 @@ namespace application {
 
         ImGui::Separator();
 
-        ImGui::SliderFloat3("Позиция", &g_position.x, -5.0f, 5.0f);
-        ImGui::SliderFloat3("Поворот", &g_rotation.x, -180.0f, 180.0f);
-        ImGui::SliderFloat3("Масштаб", &g_scale.x, 0.1f, 3.0f);
+        // ── ТРАНСФОРМАЦИЯ МОДЕЛИ ────────────────────────────────
+        if (ImGui::CollapsingHeader("Модель", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat3("Позиция",  &g_position.x, -5.0f, 5.0f);
+            ImGui::SliderFloat3("Поворот",  &g_rotation.x, -180.0f, 180.0f);
+            ImGui::SliderFloat3("Масштаб",  &g_scale.x, 0.1f, 3.0f);
+            ImGui::Checkbox("Анимация", &g_animPlaying);
+            ImGui::SliderFloat("Скорость", &g_animSpeed, 0.0f, 1.0f);
+            ImGui::SliderFloat("Радиус",   &g_animRadius, 0.0f, 5.0f);
+        }
 
         ImGui::Separator();
 
-        ImGui::Checkbox("Анимация", &g_animPlaying);
-        ImGui::SliderFloat("Скорость", &g_animSpeed, 0.00000f, 0.50f);
-        ImGui::SliderFloat("Радиус", &g_animRadius, 0.0f, 5.0f);
+        // ── КАМЕРА ──────────────────────────────────────────────
+        // Управляем позицией, углами yaw/pitch и углом обзора.
+        if (ImGui::CollapsingHeader("Камера", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat3("Позиция камеры", &g_cameraPos.x, -15.0f, 15.0f);
+            ImGui::SliderFloat("Yaw",   &g_cameraYaw,   -180.0f, 180.0f);
+            ImGui::SliderFloat("Pitch", &g_cameraPitch, -89.0f,  89.0f);
+            ImGui::SliderFloat("Угол обзора", &g_cameraFov, 20.0f, 110.0f);
+        }
 
         ImGui::Separator();
 
-        ImGui::ColorEdit3("Цвет", &g_color.x);
+        // ── НАПРАВЛЕННЫЙ ИСТОЧНИК СВЕТА ─────────────────────────
+        // Из лекции №4 (слайд 14): направленный источник — бесконечно
+        // удалённый, все лучи параллельны. Задаётся только НАПРАВЛЕНИЕМ.
+        if (ImGui::CollapsingHeader("Направленный источник", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SliderFloat3("Направление", &g_lightDirection.x, -1.0f, 1.0f);
+            ImGui::ColorEdit3("Цвет света",    &g_lightColor.x);
+            ImGui::SliderFloat("Интенсивность", &g_lightIntensity, 0.0f, 5.0f);
+        }
 
         ImGui::Separator();
+
+        // ── РАССЕЯННЫЙ СВЕТ (AMBIENT) ───────────────────────────
+        // Из лекции №4 (слайд 25): ambient имитирует свет окружения.
+        if (ImGui::CollapsingHeader("Рассеянный свет", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Цвет ambient", &g_ambientColor.x);
+        }
+
+        ImGui::Separator();
+
+        // ── МАТЕРИАЛ ────────────────────────────────────────────
+        // Из лекции №4 (слайды 21–24):
+        //   K_d — альбедо, K_s — цвет блика, α — блеск.
+        if (ImGui::CollapsingHeader("Материал", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::ColorEdit3("Альбедо (K_d)",   &g_albedo.x);
+            ImGui::ColorEdit3("Цвет блика (K_s)", &g_specularColor.x);
+            ImGui::SliderFloat("Блеск (α)", &g_shininess, 1.0f, 256.0f);
+        }
+
+        ImGui::Separator();
+
+        // ── СБРОС ───────────────────────────────────────────────
         if (ImGui::Button("Сбросить всё")) {
-            g_position       = glm::vec3(0.0f);
-            g_rotation       = glm::vec3(30.0f, 45.0f, 0.0f);
-            g_scale          = glm::vec3(1.0f);
-            g_color          = glm::vec3(1.0f, 0.6f, 0.2f);
-            g_animTime       = 0.0f;
-            g_animSpeed      = 0.02f;
-            g_animRadius     = 2.0f;
+            g_position = glm::vec3(0.0f);
+            g_rotation = glm::vec3(30.0f, 45.0f, 0.0f);
+            g_scale = glm::vec3(1.0f);
+            g_animTime = 0.0f;
+            g_animSpeed = 0.1f;
+            g_animRadius = 2.0f;
             g_projectionMode = 1;
+
+            g_cameraPos   = glm::vec3(0.0f, 2.0f, 6.0f);
+            g_cameraYaw   = -90.0f;
+            g_cameraPitch = -15.0f;
+            g_cameraFov   = 45.0f;
+
+            g_lightDirection = glm::vec3(-0.5f, -1.0f, -0.3f);
+            g_lightColor     = glm::vec3(1.0f, 1.0f, 1.0f);
+            g_lightIntensity = 1.5f;
+
+            g_ambientColor = glm::vec3(0.15f, 0.15f, 0.18f);
+
+            g_albedo        = glm::vec3(0.9f, 0.4f, 0.3f);
+            g_specularColor = glm::vec3(1.0f, 1.0f, 1.0f);
+            g_shininess     = 32.0f;
         }
 
         ImGui::End();
     }
 
+    // ============================================================
+    // РЕНДЕР
+    // ============================================================
     void render(const graphics::internal::FrameData& fd) {
         auto& ctx = graphics::internal::context;
 
+        // ── АНИМАЦИЯ СМЕЩЕНИЯ (из лабы №1) ──────────────────────
         glm::vec3 animOffset(0.0f);
         if (g_animPlaying || g_animTime > 0.0f) {
             animOffset = glm::vec3(
@@ -317,6 +542,10 @@ namespace application {
             );
         }
 
+        // ── МОДЕЛЬНАЯ МАТРИЦА (M) ───────────────────────────────
+        // Из лекции №4 (слайд 4): M = S · R · T, где порядок важен!
+        // Трансформации применяются справа налево к вершине:
+        // сначала перенос, потом поворот, потом масштаб.
         glm::mat4 model(1.0f);
         model = glm::translate(model, g_position + animOffset);
         model = glm::rotate(model, glm::radians(g_rotation.x), { 1,0,0 });
@@ -324,10 +553,15 @@ namespace application {
         model = glm::rotate(model, glm::radians(g_rotation.z), { 0,0,1 });
         model = glm::scale(model, g_scale);
 
-        glm::mat4 view = glm::lookAt(glm::vec3(0, 2, 6),
-                                     glm::vec3(0, 0, 0),
-                                     glm::vec3(0, 1, 0));
+        // ── МАТРИЦА ВИДА (V) ────────────────────────────────────
+        // Из лекции №4 (слайды 5–9): V — это ОБРАТНАЯ матрица камеры.
+        // Мы строим её через glm::lookAt (eye, center, up).
+        // center = eye + forward, где forward вычисляется из yaw/pitch.
+        glm::vec3 camForward = computeCameraForward();
+        glm::vec3 camTarget  = g_cameraPos + camForward;
+        glm::mat4 view = glm::lookAt(g_cameraPos, camTarget, glm::vec3(0, 1, 0));
 
+        // ── МАТРИЦА ПРОЕКЦИИ (P) ────────────────────────────────
         float aspect = (ctx.swapchain_extent.height > 0)
             ? (float)ctx.swapchain_extent.width / (float)ctx.swapchain_extent.height
             : 1.0f;
@@ -336,18 +570,26 @@ namespace application {
         if (g_projectionMode == 0) {
             float orthoSize = g_animRadius + 4.0f;
             proj = glm::orthoRH_ZO(-orthoSize * aspect, orthoSize * aspect,
-                                   -orthoSize, orthoSize,
-                                   0.1f, 100.0f);
+                                   -orthoSize, orthoSize, 0.1f, 100.0f);
         } else {
-            proj = glm::perspectiveRH_ZO(glm::radians(45.0f), aspect, 0.1f, 100.0f);
+            proj = glm::perspectiveRH_ZO(glm::radians(g_cameraFov), aspect, 0.1f, 100.0f);
         }
-        proj[1][1] *= -1.0f;
+        proj[1][1] *= -1.0f;   // Y-flip для Vulkan NDC
 
+        // ── ЗАПОЛНЕНИЕ UNIFORM-БУФЕРА ───────────────────────────
         UBO ubo{};
         ubo.mvp = proj * view * model;
-        ubo.color = glm::vec4(g_color, 1.0f);
+        ubo.model = model;
+        ubo.camera_pos      = glm::vec4(g_cameraPos, 1.0f);
+        ubo.light_direction = glm::vec4(glm::normalize(g_lightDirection), 0.0f);
+        ubo.light_color     = glm::vec4(g_lightColor * g_lightIntensity, 1.0f);
+        ubo.ambient_light   = glm::vec4(g_ambientColor, 1.0f);
+        ubo.albedo          = glm::vec4(g_albedo, 1.0f);
+        ubo.specular        = glm::vec4(g_specularColor, 1.0f);
+        ubo.material        = glm::vec4(g_shininess, 0.0f, 0.0f, 0.0f);
         memcpy(ctx.uniform_mapped, &ubo, sizeof(UBO));
 
+        // ── ЗАПИСЬ КОМАНД ───────────────────────────────────────
         VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         vkBeginCommandBuffer(fd.command_buffer, &begin);
 
@@ -357,7 +599,7 @@ namespace application {
         rp.renderArea = { {0,0}, ctx.swapchain_extent };
 
         VkClearValue clears[2]{};
-        clears[0].color = { {0.1f, 0.1f, 0.12f, 1.0f} };
+        clears[0].color = { {0.05f, 0.05f, 0.07f, 1.0f} };  // фон чуть темнее
         clears[1].depthStencil = { 1.0f, 0 };
         rp.clearValueCount = 2;
         rp.pClearValues = clears;
@@ -366,8 +608,7 @@ namespace application {
 
         VkViewport vp{ 0, 0,
             (float)ctx.swapchain_extent.width,
-            (float)ctx.swapchain_extent.height,
-            0, 1 };
+            (float)ctx.swapchain_extent.height, 0, 1 };
         VkRect2D sc{ {0,0}, ctx.swapchain_extent };
         vkCmdSetViewport(fd.command_buffer, 0, 1, &vp);
         vkCmdSetScissor(fd.command_buffer, 0, 1, &sc);

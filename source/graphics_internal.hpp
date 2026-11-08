@@ -44,6 +44,12 @@ struct Context {
 	// === Shader-модули ===
 	VkShaderModule        vert_shader_module    = VK_NULL_HANDLE;
 	VkShaderModule        frag_shader_module    = VK_NULL_HANDLE;
+
+	// === Текстура (ЛР3) ===
+	VkImage               albedo_image              = VK_NULL_HANDLE;
+	VmaAllocation         albedo_image_allocation   = VK_NULL_HANDLE;
+	VkImageView           albedo_image_view         = VK_NULL_HANDLE;
+	VkSampler             albedo_sampler            = VK_NULL_HANDLE;
 };
 
 struct FrameData {

@@ -4,6 +4,7 @@
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec3 fragPos;      // мировая позиция фрагмента
 layout(location = 2) in vec3 fragNormal;   // мировая нормаль
+layout(location = 3) in vec2 fragUV;       // ← ЛР3: UV-координаты
 
 // ─── ВЫХОД ─────────────────────────────────────────────────────
 layout(location = 0) out vec4 outColor;
@@ -20,8 +21,14 @@ layout(binding = 0) uniform UBO {
 
     vec4 albedo;
     vec4 specular;
-    vec4 material;   // material.x = shininess (α)
+    vec4 material;   // material.x = shininess (α), material.y = use_texture (ЛР3)
 } ubo;
+
+// ─── ТЕКСТУРА (ЛР3) ────────────────────────────────────────────
+// sampler2D — это связка «изображение + сэмплер», привязанная
+// к binding 1 в дескрипторном наборе. Во фрагментном шейдере
+// через texture(albedo_texture, uv) читаем тексель по UV.
+layout(binding = 1) uniform sampler2D albedo_texture;
 
 void main() {
     // ============================================================
@@ -60,19 +67,34 @@ void main() {
     //   h = (L + V) / |L + V|
     vec3 H = normalize(L + V);
 
+    // === ЛР3: базовый цвет — из текстуры или из UBO ===
+    // ubo.material.y — флаг: 1.0 = использовать текстуру, 0.0 = альбедо.
+    // Если используем текстуру — читаем тексель по fragUV и берём его RGB
+    // как K_d (базовый цвет материала). Иначе — цвет из uniform-буфера.
+    vec3 baseColor;
+    if (ubo.material.y > 0.5) {
+        vec4 texel = texture(albedo_texture, fragUV);
+        baseColor = texel.rgb;
+    } else {
+        baseColor = ubo.albedo.rgb;
+    }
+
     // ── AMBIENT ─────────────────────────────────────────────────
     // Рассеянный свет: I_a · K_a.
     // Из лекции №4 (слайд 25): ambient не имеет направления,
     // просто добавляет базовую освещённость всем поверхностям.
-    vec3 ambient = ubo.ambient_light.rgb * ubo.albedo.rgb;
+    // ЛР3: вместо ubo.albedo используем baseColor — он либо из текстуры,
+    // либо из UBO (в зависимости от флага).
+    vec3 ambient = ubo.ambient_light.rgb * baseColor;
 
     // ── DIFFUSE ─────────────────────────────────────────────────
     // Закон Ламберта: яркость пропорциональна cos(θ),
     // где θ — угол между нормалью N и направлением света L.
     // cos(θ) = dot(N, L). Берём max с 0, чтобы поверхности,
     // обращённые от света, не давали отрицательный вклад.
+    // ЛР3: вместо ubo.albedo — baseColor.
     float diff = max(dot(N, L), 0.0);
-    vec3 diffuse = ubo.light_color.rgb * diff * ubo.albedo.rgb;
+    vec3 diffuse = ubo.light_color.rgb * diff * baseColor;
 
     // ── SPECULAR ────────────────────────────────────────────────
     // Блик по Блинн-Фонгу: K_s · (N · H)^α.

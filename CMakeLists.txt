@@ -48,12 +48,21 @@ FetchContent_Declare(
 	GIT_TAG v1.92.9
 )
 
-# === GLM (header-only) ===
 FetchContent_Declare(
 	glm
 	GIT_REPOSITORY https://github.com/g-truc/glm.git
 	GIT_TAG 1.0.1
 )
+
+# === STB (header-only, для загрузки изображений) ===
+# Скачай stb_image.h отсюда: https://github.com/nothings/stb/blob/master/stb_image.h
+# Положи в: external/stb/stb_image.h
+# Если хочешь автоматически — раскомментируй FetchContent ниже:
+# FetchContent_Declare(
+#     stb
+#     GIT_REPOSITORY https://github.com/nothings/stb.git
+#     GIT_TAG master
+# )
 
 find_package(Vulkan REQUIRED)
 
@@ -78,7 +87,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	glm::glm
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+# === Добавляем external/stb в пути include ===
+target_include_directories(${PROJECT_NAME} PRIVATE
+	${imgui_SOURCE_DIR}
+	${imgui_SOURCE_DIR}/backends
+	${CMAKE_SOURCE_DIR}/external/stb    # ← НОВОЕ
+)
+
 target_sources(${PROJECT_NAME} PRIVATE
 	${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
 	${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
@@ -109,7 +124,6 @@ if(GLSLC_FOUND)
 		list(APPEND _SHADER_BINARIES ${SHADER_BINARY_PATH})
 	endmacro()
 
-	# === Раскомментируй эти две строки для наших шейдеров ===
 	compile_shader(shader.vert)
 	compile_shader(shader.frag)
 

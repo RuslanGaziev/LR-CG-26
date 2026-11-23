@@ -43,8 +43,6 @@ VkImage vk_image_depth_buffer;
 VmaAllocation vma_allocation_depth_buffer;
 VkImageView vk_image_view_depth_buffer;
 
-std::vector<VkFramebuffer> vk_framebuffers;
-
 VkSemaphore vk_semaphore_image_available;
 std::vector<VkSemaphore> vk_semaphores_image_finished;
 VkFence vk_fence_frame_in_flight;
@@ -250,6 +248,82 @@ void drawImGUI() {
 	vkEndCommandBuffer(vk_imgui_command_buffer);
 }
 
+// ============================================================
+// ЛР4: карта теней + сэмплер сравнения
+// ============================================================
+bool createShadowResources() {
+	context.shadow_extent = { 2048, 2048 };
+
+	const VkImageCreateInfo shadow_image = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = VK_FORMAT_D16_UNORM,
+		.extent = { context.shadow_extent.width, context.shadow_extent.height, 1 },
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+		         VK_IMAGE_USAGE_SAMPLED_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+
+	const VmaAllocationCreateInfo shadow_alloc = {
+		.usage = VMA_MEMORY_USAGE_AUTO,
+	};
+
+	if (vmaCreateImage(context.allocator, &shadow_image, &shadow_alloc,
+	                   &context.shadow_image, &context.shadow_allocation,
+	                   nullptr) != VK_SUCCESS) {
+		std::cerr << "Failed to create shadow map image\n";
+		return false;
+	}
+
+	const VkImageViewCreateInfo shadow_view = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.image = context.shadow_image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = VK_FORMAT_D16_UNORM,
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1,
+		},
+	};
+
+	if (vkCreateImageView(context.device, &shadow_view, nullptr,
+	                      &context.shadow_view) != VK_SUCCESS) {
+		std::cerr << "Failed to create shadow map image view\n";
+		return false;
+	}
+
+	// === ВАЖНО: порядок полей строго как в VkSamplerCreateInfo ===
+	// compareEnable и compareOp идут ДО borderColor.
+	const VkSamplerCreateInfo shadow_sampler = {
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+		.compareEnable = VK_TRUE,
+		.compareOp = VK_COMPARE_OP_LESS,
+		.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+	};
+
+	if (vkCreateSampler(context.device, &shadow_sampler, nullptr,
+	                    &context.shadow_sampler) != VK_SUCCESS) {
+		std::cerr << "Failed to create shadow sampler\n";
+		return false;
+	}
+
+	return true;
+}
+
 bool rebuildSwapchain(uint32_t width, uint32_t height) {
 	vkQueueWaitIdle(context.graphics_queue);
 
@@ -270,7 +344,6 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 
 	for (size_t i = 0, n = vk_swapchain_image_views.size(); i < n; ++i) {
 		vkDestroyFramebuffer(context.device, vk_imgui_framebuffers[i], nullptr);
-		vkDestroyFramebuffer(context.device, vk_framebuffers[i], nullptr);
 		vkDestroyImageView(context.device, vk_swapchain_image_views[i], nullptr);
 	}
 
@@ -286,6 +359,7 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 	vk_swapchain_images = std::move(swapchain_images);
 	vk_swapchain_image_views = std::move(swapchain_image_views);
 
+	// Пересоздаём основной depth-буфер (он привязан к размеру swapchain)
 	vkDestroyImageView(context.device, vk_image_view_depth_buffer, nullptr);
 	vmaDestroyImage(context.allocator, vk_image_depth_buffer, vma_allocation_depth_buffer);
 
@@ -334,34 +408,8 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 		return false;
 	}
 
+	// Пересоздаём ImGui-framebuffer'ы под новые swapchain image view
 	const uint32_t swapchain_images_count = uint32_t(vk_swapchain_images.size());
-
-	VkImageView framebuffer_attachments[] = {
-		VK_NULL_HANDLE,
-		vk_image_view_depth_buffer,
-	};
-
-	const VkFramebufferCreateInfo framebuffer = {
-		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-		.renderPass = context.render_pass,
-		.attachmentCount = sizeof(framebuffer_attachments) / sizeof(framebuffer_attachments[0]),
-		.pAttachments = framebuffer_attachments,
-		.width = uint32_t(width),
-		.height = uint32_t(height),
-		.layers = 1,
-	};
-
-	vk_framebuffers.resize(swapchain_images_count);
-
-	for (uint32_t i = 0; i < swapchain_images_count; ++i) {
-		framebuffer_attachments[0] = vk_swapchain_image_views[i];
-
-		if (vkCreateFramebuffer(context.device, &framebuffer, nullptr,
-								&vk_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << '\n';
-			return false;
-		}
-	}
 
 	vk_imgui_framebuffers.resize(swapchain_images_count);
 
@@ -399,9 +447,14 @@ bool initialize(GLFWwindow* const window) {
 
 	vkb::InstanceBuilder ib;
 
-	auto ibr = ib.require_api_version(VK_MAKE_VERSION(1, 1, 0))
+	// === ЛР4: поднимаем API до 1.3 — нужен core vkCmdBeginRendering ===
+	auto ibr = ib.require_api_version(VK_MAKE_VERSION(1, 3, 0))
 				 .request_validation_layers()
 				 .build();
+	if (!ibr) {
+		std::cerr << ibr.error().message() << '\n';
+		return false;
+	}
 
 	auto vkb_instance = ibr.value();
 	vk_instance = vkb_instance.instance;
@@ -532,86 +585,6 @@ bool initialize(GLFWwindow* const window) {
 		return false;
 	}
 
-	const VkAttachmentDescription render_pass_attachments[] = {
-		{
-			.format = context.swapchain_format,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		},
-		{
-			.format = VK_FORMAT_D16_UNORM,
-			.samples = VK_SAMPLE_COUNT_1_BIT,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-			.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-			.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-		},
-	};
-
-	const VkAttachmentReference render_pass_color_attachment = {
-		.attachment = 0,
-		.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-	};
-
-	const VkAttachmentReference render_pass_depth_attachment = {
-		.attachment = 1,
-		.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-	};
-
-	const VkSubpassDescription render_pass_subpass = {
-		.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-		.colorAttachmentCount = 1,
-		.pColorAttachments = &render_pass_color_attachment,
-		.pDepthStencilAttachment = &render_pass_depth_attachment,
-	};
-
-	const VkRenderPassCreateInfo render_pass = {
-		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-		.attachmentCount = sizeof(render_pass_attachments) / sizeof(render_pass_attachments[0]),
-		.pAttachments = render_pass_attachments,
-		.subpassCount = 1,
-		.pSubpasses = &render_pass_subpass,
-	};
-
-	if (vkCreateRenderPass(context.device, &render_pass, nullptr, &context.render_pass) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan render pass\n";
-		return false;
-	}
-
-	VkImageView framebuffer_attachments[] = {
-		VK_NULL_HANDLE,
-		vk_image_view_depth_buffer
-	};
-
-	const VkFramebufferCreateInfo framebuffer = {
-		.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-		.renderPass = context.render_pass,
-		.attachmentCount = sizeof(framebuffer_attachments) / sizeof(framebuffer_attachments[0]),
-		.pAttachments = framebuffer_attachments,
-		.width = uint32_t(width),
-		.height = uint32_t(height),
-		.layers = 1,
-	};
-
-	vk_framebuffers.resize(swapchain_images_count);
-
-	for (uint32_t i = 0; i < swapchain_images_count; ++i) {
-		framebuffer_attachments[0] = vk_swapchain_image_views[i];
-
-		if (vkCreateFramebuffer(context.device, &framebuffer, nullptr,
-								&vk_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << '\n';
-			return false;
-		}
-	}
-
 	const VkSemaphoreCreateInfo semaphore = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 
 	const VkFenceCreateInfo fence = {
@@ -668,6 +641,12 @@ bool initialize(GLFWwindow* const window) {
 		return false;
 	}
 
+	// === ЛР4: карта теней и сэмплер сравнения ===
+	if (!createShadowResources()) {
+		std::cerr << "Failed to create shadow resources\n";
+		return false;
+	}
+
 	return true;
 }
 
@@ -691,10 +670,10 @@ void shutdown() {
 	}
 	vkDestroySemaphore(context.device, vk_semaphore_image_available, nullptr);
 
-	for (size_t i = 0, n = vk_swapchain_images.size(); i < n; ++i) {
-		vkDestroyFramebuffer(context.device, vk_framebuffers[i], nullptr);
-	}
-	vkDestroyRenderPass(context.device, context.render_pass, nullptr);
+	// === ЛР4: теневые ресурсы ===
+	if (context.shadow_sampler) vkDestroySampler(context.device, context.shadow_sampler, nullptr);
+	if (context.shadow_view)    vkDestroyImageView(context.device, context.shadow_view, nullptr);
+	if (context.shadow_image)   vmaDestroyImage(context.allocator, context.shadow_image, context.shadow_allocation);
 
 	vkDestroyImageView(context.device, vk_image_view_depth_buffer, nullptr);
 	vmaDestroyImage(context.allocator, vk_image_depth_buffer, vma_allocation_depth_buffer);
@@ -749,8 +728,13 @@ retry_acquire:
 	vkResetFences(context.device, 1, &vk_fence_frame_in_flight);
 
 	return {
-		.framebuffer = vk_framebuffers[vk_swapchain_current_image],
+		.framebuffer = VK_NULL_HANDLE,
 		.command_buffer = vk_command_buffer,
+		.swapchain_image_view = vk_swapchain_image_views[vk_swapchain_current_image],
+		.swapchain_image = vk_swapchain_images[vk_swapchain_current_image],
+		.depth_image_view = vk_image_view_depth_buffer,
+		.depth_image = vk_image_depth_buffer,
+		.extent = context.swapchain_extent,
 	};
 }
 
@@ -790,7 +774,7 @@ void submitAndPresent() {
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
+	} else if (result != VK_SUCCESS) {
 		std::cerr << "Failed to present Vulkan swapchain image\n";
 	}
 }
